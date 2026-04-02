@@ -35,10 +35,37 @@ ltk-discord-bot/
 - Python 3.10 以上
 - Discord Developer Portal で BOT 作成済み
 - BOT に以下権限があること
+  - `View Channels`
   - `Send Messages`
-  - `Use Slash Commands`
   - `Read Message History`
-  - `Mention Everyone` は不要
+  - `Use Slash Commands`
+
+## 推奨権限
+
+最小権限で十分です。
+
+- 必須
+  - `View Channels`
+  - `Send Messages`
+  - `Read Message History`
+  - `Use Slash Commands`
+
+- 不要
+  - `Administrator`
+  - `Manage Server`
+  - `Manage Roles`
+  - `Manage Channels`
+  - `Kick Members`
+  - `Ban Members`
+  - `Mention Everyone`
+  - `Message Content Intent` を前提にした運用
+
+## セキュリティメモ
+
+- BOT トークンはコードにハードコーディングせず、環境変数 `DISCORD_BOT_TOKEN` から読み込みます
+- この BOT は過去メッセージを収集・保存しません
+- 保存対象は募集、対象メンバー、回答、コメント、リマインド履歴です
+- サーバーごとのデータは `guild_id` で分離しています
 
 ## セットアップ
 
@@ -176,6 +203,5 @@ SQLite に保存されます。
 ## 補足
 
 - リーダー判定は `LEADER_ROLE_NAMES` に指定したロール名、または Discord の管理権限を持つユーザーです
-- 登録メンバー以外は `/availability_set` できません
+- 対象メンバー以外は通知メッセージのUIから回答できません
 - コメントは候補ごとに1人1件で上書き保存です
-- Koyeb に載せる場合は `KOYEB_DEPLOY.md` を参照してください
