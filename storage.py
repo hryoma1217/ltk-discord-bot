@@ -134,6 +134,14 @@ class Storage:
                     PRIMARY KEY (option_id, stage_minutes),
                     FOREIGN KEY (option_id) REFERENCES practice_options(id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS practice_event_logs (
+                    practice_id INTEGER NOT NULL,
+                    event_key TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY (practice_id, event_key),
+                    FOREIGN KEY (practice_id) REFERENCES practices(id) ON DELETE CASCADE
+                );
                 """
             )
             self._ensure_column(conn, "practices", "collect_deadline", "TEXT")
@@ -220,6 +228,13 @@ class Storage:
         sql += " ORDER BY id DESC"
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
+        return [Practice(**dict(row)) for row in rows]
+
+    def list_all_open_practices(self) -> list[Practice]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM practices WHERE is_closed = 0 ORDER BY id DESC"
+            ).fetchall()
         return [Practice(**dict(row)) for row in rows]
 
     def get_practice(self, practice_id: int, guild_id: int | None = None) -> Practice | None:
@@ -392,4 +407,22 @@ class Storage:
                 VALUES (?, ?, ?)
                 """,
                 (option_id, stage_minutes, sent_at),
+            )
+
+    def was_practice_event_sent(self, practice_id: int, event_key: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM practice_event_logs WHERE practice_id = ? AND event_key = ?",
+                (practice_id, event_key),
+            ).fetchone()
+        return row is not None
+
+    def mark_practice_event_sent(self, practice_id: int, event_key: str, sent_at: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO practice_event_logs (practice_id, event_key, sent_at)
+                VALUES (?, ?, ?)
+                """,
+                (practice_id, event_key, sent_at),
             )

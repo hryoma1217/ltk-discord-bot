@@ -274,6 +274,7 @@ class PracticeBot(commands.Bot):
     async def reminder_loop(self) -> None:
         await self.wait_until_ready()
         current = now_jst(self.config_data.timezone)
+        await self._send_collection_progress_reminders(current)
         await self._close_expired_practices(current)
         rows = self.storage.get_confirmed_options()
         for row in rows:
@@ -321,6 +322,68 @@ class PracticeBot(commands.Bot):
 
                 await channel.send("\n".join(message_lines))
                 self.storage.mark_reminder_sent(option_id, minutes, current.isoformat())
+
+    async def _send_collection_progress_reminders(self, current: datetime) -> None:
+        for practice in self.storage.list_all_open_practices():
+            await self._emit_collection_progress_for_practice(practice, current)
+
+    async def _emit_collection_progress_for_practice(self, practice, current: datetime) -> None:
+        if not practice.collect_deadline:
+            return
+        created_at = datetime.fromisoformat(practice.created_at)
+        deadline = datetime.fromisoformat(practice.collect_deadline)
+        if deadline <= created_at:
+            return
+
+        channel = self.get_channel(int(practice.channel_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(practice.channel_id))
+            except discord.HTTPException:
+                return
+        if not isinstance(channel, discord.abc.Messageable):
+            return
+
+        midpoint = created_at + (deadline - created_at) / 2
+        midpoint_key = "collection_midpoint_status"
+        if (
+            midpoint <= current <= midpoint + timedelta(minutes=1)
+            and not self.storage.was_practice_event_sent(practice.id, midpoint_key)
+        ):
+            await channel.send(
+                "📊 **日程調整の途中経過**\n"
+                f"{self.build_practice_summary(practice.id, practice.guild_id)}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            self.storage.mark_practice_event_sent(practice.id, midpoint_key, current.isoformat())
+
+        remind_at = deadline - timedelta(minutes=10)
+        remind_key = "deadline_unanswered_10m"
+        if (
+            remind_at <= current <= remind_at + timedelta(minutes=1)
+            and not self.storage.was_practice_event_sent(practice.id, remind_key)
+        ):
+            targets = self.storage.list_practice_targets(practice.id)
+            responses = self.storage.get_availability_for_practice(practice.id)
+            responded_ids = {
+                int(row["user_id"])
+                for row in responses
+                if row["user_id"] is not None
+            }
+            pending_mentions = [
+                f"<@{target.user_id}>"
+                for target in targets
+                if target.user_id not in responded_ids
+            ]
+            if pending_mentions:
+                await channel.send(
+                    "⏳ **回答締切が近いです**\n"
+                    f"締切: {format_dt(deadline)}\n"
+                    f"未回答: {' '.join(pending_mentions)}\n"
+                    "通知メッセージのボタンUIから回答してください。",
+                    allowed_mentions=discord.AllowedMentions(users=True),
+                )
+            self.storage.mark_practice_event_sent(practice.id, remind_key, current.isoformat())
 
     async def _close_expired_practices(self, current: datetime) -> None:
         expired = self.storage.get_expired_open_practices(current.isoformat())
