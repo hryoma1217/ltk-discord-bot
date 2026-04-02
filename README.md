@@ -1,0 +1,170 @@
+# LTK Discord Bot
+
+LTK 向けの Discord BOT です。  
+目的は、初対面メンバーが多いチームでも練習日程を合わせやすくし、確定後のリマインドまで自動化することです。
+
+## できること
+
+- リーダーがメンバーを事前登録
+- 登録メンバーだけが日程調整に回答
+- リーダーが集計期限を設定
+- 期限を過ぎると自動で集計クローズ
+- 未確定のまま期限切れなら BOT がキャンセル通知
+- 候補日時ごとに `参加可 / 微妙 / 不可` を登録
+- 各候補にコメントを残せる
+  - 例: `22時からなら可`
+  - 例: `途中参加なら可`
+- 練習日程を確定
+- 確定した日程に対して自動リマインド
+- 手動リマインドも可能
+
+## ディレクトリ構成
+
+```text
+ltk-discord-bot/
+├─ bot.py
+├─ storage.py
+├─ requirements.txt
+├─ .env.example
+└─ README.md
+```
+
+## 前提
+
+- Python 3.10 以上
+- Discord Developer Portal で BOT 作成済み
+- BOT に以下権限があること
+  - `Send Messages`
+  - `Use Slash Commands`
+  - `Read Message History`
+  - `Mention Everyone` は不要
+
+## セットアップ
+
+### 1. 仮想環境作成
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### 2. 依存インストール
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. 環境変数設定
+
+`.env.example` を `.env` にコピーして編集してください。
+
+```env
+DISCORD_BOT_TOKEN=your_bot_token_here
+LEADER_ROLE_NAMES=LTK運営,LTKリーダー
+DATABASE_PATH=data/ltk_bot.sqlite3
+DEFAULT_TIMEZONE=Asia/Tokyo
+REMINDER_OFFSETS_MINUTES=1440,180,30
+```
+
+### 4. 起動
+
+```bash
+python bot.py
+```
+
+## コマンド一覧
+
+### リーダー向け
+
+- `/member_add`
+  - メンバーを登録または更新
+- `/member_remove`
+  - 登録メンバー削除
+- `/practice_create`
+  - 練習候補を作成
+  - 集計期限も設定
+- `/practice_confirm`
+  - 確定候補を設定
+- `/practice_close`
+  - 募集を締切
+- `/practice_remind`
+  - 手動リマインド送信
+
+### 全員向け
+
+- `/member_list`
+  - 登録メンバー確認
+- `/practice_list`
+  - 募集一覧確認
+- `/practice_show`
+  - 募集詳細確認
+- `/availability_set`
+  - 自分の回答を登録
+- `/practice_help`
+  - 使い方表示
+
+## 練習候補の入力形式
+
+`/practice_create` の `options_text` に、1行ごとに候補を入れます。  
+あわせて `deadline_text` に集計期限を入れます。
+
+例:
+
+```text
+2026-04-05 21:00 | フルメン前提
+2026-04-06 22:00 | 23時まで
+04/07 21:30 | カスタム軽め
+```
+
+集計期限の例:
+
+```text
+2026-04-04 20:00
+```
+
+使える形式:
+
+- `YYYY-MM-DD HH:MM`
+- `YYYY/MM/DD HH:MM`
+- `MM/DD HH:MM`
+- `MM-DD HH:MM`
+
+`|` の右側は候補メモとして保存されます。
+
+## 使い方の流れ
+
+1. リーダーが `/member_add` でメンバー登録
+2. `/practice_create` で候補日時と集計期限を作成
+3. 各メンバーが `/availability_set` で回答
+4. リーダーが `/practice_show` で集計確認
+5. `/practice_confirm` で日程確定
+6. BOT が自動でリマインド
+
+## 集計期限の動作
+
+- リーダーが設定した `集計期限` を過ぎると、BOT が自動で募集をクローズします
+- 期限時点で候補が未確定なら、BOT が以下の趣旨で通知します
+
+```text
+この予定は予定が合わないのでキャンセル！また集計してね。
+```
+
+- すでに候補を確定している場合は、キャンセルではなく「自動クローズ」として扱います
+
+## 保存データ
+
+SQLite に保存されます。
+
+- メンバー一覧
+- 練習募集
+- 候補日時
+- 回答状況
+- コメント
+- リマインド送信履歴
+
+## 補足
+
+- リーダー判定は `LEADER_ROLE_NAMES` に指定したロール名、または Discord の管理権限を持つユーザーです
+- 登録メンバー以外は `/availability_set` できません
+- コメントは候補ごとに1人1件で上書き保存です
+- Koyeb に載せる場合は `KOYEB_DEPLOY.md` を参照してください
