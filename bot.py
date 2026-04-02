@@ -120,16 +120,23 @@ def parse_single_datetime(raw: str, tz: ZoneInfo) -> datetime:
 
 def parse_deadline_offset(raw: str) -> timedelta:
     text = raw.strip().lower()
-    match = re.fullmatch(r"(\d+)\s*([mh])", text)
-    if not match:
-        raise ValueError("集計期限は `30m` または `24h` の形式で入力してください。")
-    amount = int(match.group(1))
-    unit = match.group(2)
-    if amount <= 0:
-        raise ValueError("集計期限は 1 以上で指定してください。")
-    if unit == "m":
-        return timedelta(minutes=amount)
-    return timedelta(hours=amount)
+    parts = re.findall(r"(\d+)\s*([mhd])", text)
+    normalized = "".join(f"{amount}{unit}" for amount, unit in parts)
+    if not parts or normalized != text.replace(" ", ""):
+        raise ValueError("集計期限は `15m` `2h` `1d` `3h15m` のような形式で入力してください。")
+
+    total = timedelta()
+    for amount_text, unit in parts:
+        amount = int(amount_text)
+        if amount <= 0:
+            raise ValueError("集計期限は 1 以上で指定してください。")
+        if unit == "m":
+            total += timedelta(minutes=amount)
+        elif unit == "h":
+            total += timedelta(hours=amount)
+        else:
+            total += timedelta(days=amount)
+    return total
 
 
 class PracticeBot(commands.Bot):
@@ -480,7 +487,7 @@ async def member_list(interaction: discord.Interaction):
 @app_commands.describe(
     title="募集タイトル",
     options_text="候補日時を1行ずつ入力。例: 2026-04-05 21:00 | スクリム",
-    deadline_text="集計期限。例: 30m または 24h",
+    deadline_text="集計期限。例: 15m / 2h / 1d / 3h15m",
     description="説明やメモ",
     member1="対象メンバー1",
     member2="対象メンバー2",
@@ -691,7 +698,7 @@ async def practice_help(interaction: discord.Interaction):
         "リーダー:\n"
         "- /member_add\n"
         "- /member_remove\n"
-        "- /practice_create （集計期限は 30m / 24h 形式、対象メンバー指定つき）\n"
+        "- /practice_create （集計期限は 15m / 2h / 1d / 3h15m 形式、対象メンバー指定つき）\n"
         "- /practice_confirm\n"
         "- /practice_close\n"
         "- /practice_remind\n\n"
