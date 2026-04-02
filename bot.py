@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
+import re
 
 import discord
 from discord import app_commands
@@ -110,6 +111,20 @@ def parse_single_datetime(raw: str, tz: ZoneInfo) -> datetime:
     return parsed
 
 
+def parse_deadline_offset(raw: str) -> timedelta:
+    text = raw.strip().lower()
+    match = re.fullmatch(r"(\d+)\s*([mh])", text)
+    if not match:
+        raise ValueError("集計期限は `30m` または `24h` の形式で入力してください。")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if amount <= 0:
+        raise ValueError("集計期限は 1 以上で指定してください。")
+    if unit == "m":
+        return timedelta(minutes=amount)
+    return timedelta(hours=amount)
+
+
 class PracticeBot(commands.Bot):
     def __init__(self, config: BotConfig) -> None:
         intents = discord.Intents.default()
@@ -145,9 +160,9 @@ class PracticeBot(commands.Bot):
             return False
         return True
 
-    async def ensure_registered(self, interaction: discord.Interaction) -> bool:
-        if not self.get_registered_member(interaction.user.id):
-            await interaction.response.send_message("登録メンバーのみ回答できます。", ephemeral=True)
+    async def ensure_target_member(self, interaction: discord.Interaction, practice_id: int) -> bool:
+        if not self.storage.is_practice_target(practice_id, interaction.user.id):
+            await interaction.response.send_message("この募集で指定された対象メンバーのみ回答できます。", ephemeral=True)
             return False
         return True
 
@@ -157,8 +172,9 @@ class PracticeBot(commands.Bot):
             return "募集が見つかりません。"
 
         options = self.storage.get_practice_options(practice_id)
-        member_map = {m.user_id: m for m in self.storage.list_members()}
-        registered_ids = set(member_map.keys())
+        targets = self.storage.list_practice_targets(practice_id)
+        target_map = {target.user_id: target for target in targets}
+        target_ids = set(target_map.keys())
 
         lines = [
             f"**募集ID:** {practice.id}",
@@ -172,6 +188,13 @@ class PracticeBot(commands.Bot):
         lines.append(f"**状態:** {'締切済み' if practice.is_closed else '募集中'}")
         if practice.closed_reason:
             lines.append(f"**クローズ理由:** {practice.closed_reason}")
+        if targets:
+            member_names = [target.display_name for target in targets if target.role_kind == "member"]
+            coach_names = [target.display_name for target in targets if target.role_kind == "coach"]
+            if member_names:
+                lines.append(f"**対象メンバー:** {', '.join(member_names)}")
+            if coach_names:
+                lines.append(f"**コーチ:** {', '.join(coach_names)}")
         lines.append("")
 
         for option in options:
@@ -182,13 +205,15 @@ class PracticeBot(commands.Bot):
             comment_lines = []
             for row in responses:
                 uid = int(row["user_id"])
+                if uid not in target_ids:
+                    continue
                 responded_ids.add(uid)
                 label = row["display_name"] or f"User:{uid}"
                 status = row["status"]
                 by_status.setdefault(status, []).append(label)
                 if row["comment"]:
                     comment_lines.append(f"- {label}: {row['comment']}")
-            pending = [member_map[uid].display_name for uid in sorted(registered_ids - responded_ids)]
+            pending = [target_map[uid].display_name for uid in sorted(target_ids - responded_ids)]
 
             prefix = "✅" if option.is_confirmed else "・"
             lines.append(f"{prefix} 候補{option.option_no}: {format_dt(dt)}")
@@ -334,8 +359,17 @@ async def member_list(interaction: discord.Interaction):
 @app_commands.describe(
     title="募集タイトル",
     options_text="候補日時を1行ずつ入力。例: 2026-04-05 21:00 | スクリム",
-    deadline_text="集計期限。例: 2026-04-04 20:00",
+    deadline_text="集計期限。例: 30m または 24h",
     description="説明やメモ",
+    member1="対象メンバー1",
+    member2="対象メンバー2",
+    member3="対象メンバー3",
+    member4="対象メンバー4",
+    member5="対象メンバー5",
+    member6="対象メンバー6",
+    member7="対象メンバー7",
+    member8="対象メンバー8",
+    coach="任意のコーチ",
 )
 async def practice_create(
     interaction: discord.Interaction,
@@ -343,6 +377,15 @@ async def practice_create(
     options_text: str,
     deadline_text: str,
     description: str | None = None,
+    member1: discord.Member | None = None,
+    member2: discord.Member | None = None,
+    member3: discord.Member | None = None,
+    member4: discord.Member | None = None,
+    member5: discord.Member | None = None,
+    member6: discord.Member | None = None,
+    member7: discord.Member | None = None,
+    member8: discord.Member | None = None,
+    coach: discord.Member | None = None,
 ):
     if not await bot.ensure_leader(interaction):
         return
@@ -352,8 +395,9 @@ async def practice_create(
         return
 
     parsed_options: list[tuple[int, str, str | None]] = []
+    created_at = now_jst(bot.config_data.timezone)
     try:
-        deadline = parse_single_datetime(deadline_text, bot.config_data.timezone)
+        deadline = created_at + parse_deadline_offset(deadline_text)
         for idx, line in enumerate(option_lines, start=1):
             dt, note = parse_datetime_line(line, bot.config_data.timezone)
             parsed_options.append((idx, dt.isoformat(), note))
@@ -365,20 +409,38 @@ async def practice_create(
         await interaction.response.send_message("集計期限は、すべての候補日時より前にしてください。", ephemeral=True)
         return
 
+    raw_members = [member1, member2, member3, member4, member5, member6, member7, member8]
+    targets: list[tuple[int, str, str, int]] = []
+    seen_ids: set[int] = set()
+    for sort_order, member in enumerate((m for m in raw_members if m is not None), start=1):
+        if member.id in seen_ids:
+            continue
+        seen_ids.add(member.id)
+        targets.append((member.id, member.display_name, "member", sort_order))
+        bot.storage.add_member(member.id, member.display_name, "member", None, created_at.isoformat())
+    if coach and coach.id not in seen_ids:
+        targets.append((coach.id, coach.display_name, "coach", len(targets) + 1))
+        bot.storage.add_member(coach.id, coach.display_name, "coach", None, created_at.isoformat())
+    if not targets:
+        await interaction.response.send_message("対象メンバーを1人以上指定してください。", ephemeral=True)
+        return
+
     practice_id = bot.storage.create_practice(
         title=title,
         description=description,
         channel_id=interaction.channel_id or 0,
         created_by=interaction.user.id,
-        created_at=now_jst(bot.config_data.timezone).isoformat(),
+        created_at=created_at.isoformat(),
         collect_deadline=deadline.isoformat(),
         options=parsed_options,
+        targets=targets,
     )
     summary = bot.build_practice_summary(practice_id)
+    mentions = " ".join(f"<@{user_id}>" for user_id, _, _, _ in targets)
     await interaction.response.send_message(
-        f"日程調整を作成しました。\n\n{summary}\n\n"
-        "登録メンバーは `/availability_set` で回答してください。",
-        allowed_mentions=discord.AllowedMentions.none(),
+        f"{mentions}\n日程調整を作成しました。\n\n{summary}\n\n"
+        "対象メンバーは `/availability_set` で回答してください。",
+        allowed_mentions=discord.AllowedMentions(users=True),
     )
 
 
@@ -425,10 +487,11 @@ async def availability_set(
     status: Literal["available", "maybe", "unavailable"],
     comment: str | None = None,
 ):
-    if not await bot.ensure_registered(interaction):
-        return
     practice = bot.storage.get_practice(practice_id)
     if not practice:
+        await interaction.response.send_message("指定の募集が見つかりません。", ephemeral=True)
+        return
+    if not await bot.ensure_target_member(interaction, practice_id):
         return
     options = bot.storage.get_practice_options(practice_id)
     option = next((opt for opt in options if opt.option_no == option_no), None)
@@ -506,7 +569,7 @@ async def practice_help(interaction: discord.Interaction):
         "リーダー:\n"
         "- /member_add\n"
         "- /member_remove\n"
-        "- /practice_create （集計期限つき）\n"
+        "- /practice_create （集計期限は 30m / 24h 形式、対象メンバー指定つき）\n"
         "- /practice_confirm\n"
         "- /practice_close\n"
         "- /practice_remind\n\n"

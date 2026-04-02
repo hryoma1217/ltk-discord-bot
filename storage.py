@@ -47,6 +47,15 @@ class Availability:
     updated_at: str
 
 
+@dataclass
+class PracticeTarget:
+    practice_id: int
+    user_id: int
+    display_name: str
+    role_kind: str
+    sort_order: int
+
+
 class Storage:
     def __init__(self, db_path: str) -> None:
         path = Path(db_path)
@@ -93,6 +102,16 @@ class Storage:
                     note TEXT,
                     is_confirmed INTEGER NOT NULL DEFAULT 0,
                     UNIQUE (practice_id, option_no),
+                    FOREIGN KEY (practice_id) REFERENCES practices(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS practice_targets (
+                    practice_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    role_kind TEXT NOT NULL DEFAULT 'member',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (practice_id, user_id),
                     FOREIGN KEY (practice_id) REFERENCES practices(id) ON DELETE CASCADE
                 );
 
@@ -162,6 +181,7 @@ class Storage:
         created_at: str,
         collect_deadline: str | None,
         options: Iterable[tuple[int, str, str | None]],
+        targets: Iterable[tuple[int, str, str, int]],
     ) -> int:
         with self._connect() as conn:
             cur = conn.execute(
@@ -178,6 +198,13 @@ class Storage:
                 VALUES (?, ?, ?, ?)
                 """,
                 [(practice_id, option_no, starts_at, note) for option_no, starts_at, note in options],
+            )
+            conn.executemany(
+                """
+                INSERT INTO practice_targets (practice_id, user_id, display_name, role_kind, sort_order)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [(practice_id, user_id, display_name, role_kind, sort_order) for user_id, display_name, role_kind, sort_order in targets],
             )
         return practice_id
 
@@ -202,6 +229,27 @@ class Storage:
                 (practice_id,),
             ).fetchall()
         return [PracticeOption(**dict(row)) for row in rows]
+
+    def list_practice_targets(self, practice_id: int) -> list[PracticeTarget]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT practice_id, user_id, display_name, role_kind, sort_order
+                FROM practice_targets
+                WHERE practice_id = ?
+                ORDER BY sort_order ASC, display_name COLLATE NOCASE, user_id ASC
+                """,
+                (practice_id,),
+            ).fetchall()
+        return [PracticeTarget(**dict(row)) for row in rows]
+
+    def is_practice_target(self, practice_id: int, user_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM practice_targets WHERE practice_id = ? AND user_id = ?",
+                (practice_id, user_id),
+            ).fetchone()
+        return row is not None
 
     def close_practice(self, practice_id: int, reason: str | None = None) -> bool:
         with self._connect() as conn:
