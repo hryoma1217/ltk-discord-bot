@@ -188,7 +188,7 @@ class PracticeBot(commands.Bot):
         status: str,
         comment: str | None = None,
     ) -> tuple[bool, str]:
-        practice = self.storage.get_practice(practice_id)
+        practice = self.storage.get_practice(practice_id, interaction.guild_id)
         if not practice:
             return False, "指定の募集が見つかりません。"
         if practice.is_closed:
@@ -208,7 +208,7 @@ class PracticeBot(commands.Bot):
         return True, f"候補{option_no} に `{STATUS_LABELS[status]}` で回答しました。"
 
     def build_practice_summary(self, practice_id: int) -> str:
-        practice = self.storage.get_practice(practice_id)
+        practice = self.storage.get_practice(practice_id, interaction.guild_id)
         if not practice:
             return "募集が見つかりません。"
 
@@ -409,7 +409,7 @@ class AvailabilityButton(discord.ui.Button):
             "unavailable": discord.ButtonStyle.danger,
         }
         super().__init__(
-            label=f"候補{option_no} {STATUS_BUTTON_LABELS[status]}",
+            label=STATUS_BUTTON_LABELS[status],
             style=style_map[status],
         )
         self.practice_id = practice_id
@@ -445,42 +445,53 @@ class PracticeAvailabilityView(discord.ui.View):
 bot = PracticeBot(load_config())
 
 
-@bot.tree.command(name="member_add", description="登録メンバーを追加または更新します")
-@app_commands.describe(user="登録するメンバー", role_label="ロールや担当", note="備考")
-async def member_add(interaction: discord.Interaction, user: discord.Member, role_label: str | None = None, note: str | None = None):
-    if not await bot.ensure_leader(interaction):
-        return
-    bot.storage.add_member(user.id, user.display_name, role_label, note, now_jst(bot.config_data.timezone).isoformat())
-    await interaction.response.send_message(f"{user.mention} を登録しました。", ephemeral=True)
+def _practice_choice_name(practice) -> str:
+    label = practice.title
+    if practice.collect_deadline:
+        deadline = format_dt(datetime.fromisoformat(practice.collect_deadline))
+        label = f"{label} | 締切 {deadline}"
+    return label[:100]
 
 
-@bot.tree.command(name="member_remove", description="登録メンバーを削除します")
-async def member_remove(interaction: discord.Interaction, user: discord.Member):
-    if not await bot.ensure_leader(interaction):
-        return
-    ok = bot.storage.remove_member(user.id)
-    await interaction.response.send_message(
-        f"{user.mention} を削除しました。" if ok else "登録されていません。",
-        ephemeral=True,
-    )
+async def practice_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[int]]:
+    if interaction.guild_id is None:
+        return []
+    current_lower = current.lower().strip()
+    practices = bot.storage.list_practices(interaction.guild_id, include_closed=True)
+    filtered = []
+    for practice in practices:
+        haystack = f"{practice.id} {practice.title}".lower()
+        if not current_lower or current_lower in haystack:
+            filtered.append(app_commands.Choice(name=_practice_choice_name(practice), value=practice.id))
+        if len(filtered) >= 25:
+            break
+    return filtered
 
 
-@bot.tree.command(name="member_list", description="登録済みメンバーを一覧表示します")
-async def member_list(interaction: discord.Interaction):
-    members = bot.storage.list_members()
-    if not members:
-        await interaction.response.send_message("登録メンバーはまだいません。", ephemeral=True)
-        return
-    lines = ["**登録メンバー一覧**"]
-    for member in members:
-        extra = []
-        if member.role_label:
-            extra.append(member.role_label)
-        if member.note:
-            extra.append(member.note)
-        suffix = f" ({' / '.join(extra)})" if extra else ""
-        lines.append(f"- {member.display_name}{suffix}")
-    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+async def option_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[int]]:
+    practice_id = getattr(interaction.namespace, "practice_id", None)
+    if not practice_id:
+        return []
+    try:
+        practice_id = int(practice_id)
+    except (TypeError, ValueError):
+        return []
+    current_lower = current.lower().strip()
+    options = bot.storage.get_practice_options(practice_id)
+    choices = []
+    for option in options:
+        dt = format_dt(datetime.fromisoformat(option.starts_at))
+        note = f" | {option.note}" if option.note else ""
+        name = f"{dt}{note}"
+        if not current_lower or current_lower in name.lower() or current_lower == str(option.option_no):
+            choices.append(app_commands.Choice(name=name[:100], value=option.option_no))
+        if len(choices) >= 25:
+            break
+    return choices
 
 
 @bot.tree.command(name="practice_create", description="練習日程の候補を作成します")
@@ -554,6 +565,7 @@ async def practice_create(
         return
 
     practice_id = bot.storage.create_practice(
+        guild_id=interaction.guild_id or 0,
         title=title,
         description=description,
         channel_id=interaction.channel_id or 0,
@@ -575,7 +587,10 @@ async def practice_create(
 
 @bot.tree.command(name="practice_list", description="日程調整の一覧を表示します")
 async def practice_list(interaction: discord.Interaction, include_closed: bool = False):
-    practices = bot.storage.list_practices(include_closed=include_closed)
+    if interaction.guild_id is None:
+        await interaction.response.send_message("サーバー内でのみ利用できます。", ephemeral=True)
+        return
+    practices = bot.storage.list_practices(interaction.guild_id, include_closed=include_closed)
     if not practices:
         await interaction.response.send_message("日程調整はまだありません。", ephemeral=True)
         return
@@ -590,8 +605,9 @@ async def practice_list(interaction: discord.Interaction, include_closed: bool =
 
 
 @bot.tree.command(name="practice_show", description="指定した日程調整の詳細を表示します")
+@app_commands.autocomplete(practice_id=practice_autocomplete)
 async def practice_show(interaction: discord.Interaction, practice_id: int):
-    practice = bot.storage.get_practice(practice_id)
+    practice = bot.storage.get_practice(practice_id, interaction.guild_id)
     if not practice:
         await interaction.response.send_message("指定の募集が見つかりません。", ephemeral=True)
         return
@@ -609,6 +625,7 @@ async def practice_show(interaction: discord.Interaction, practice_id: int):
     status="参加状態",
     comment="コメント（例: 22時からなら可）",
 )
+@app_commands.autocomplete(practice_id=practice_autocomplete, option_no=option_autocomplete)
 async def availability_set(
     interaction: discord.Interaction,
     practice_id: int,
@@ -635,31 +652,87 @@ async def availability_set(
 
 
 @bot.tree.command(name="practice_close", description="日程調整を締め切ります")
+@app_commands.autocomplete(practice_id=practice_autocomplete)
 async def practice_close(interaction: discord.Interaction, practice_id: int):
     if not await bot.ensure_leader(interaction):
+        return
+    practice = bot.storage.get_practice(practice_id, interaction.guild_id)
+    if not practice:
+        await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
         return
     ok = bot.storage.close_practice(practice_id)
     await interaction.response.send_message("締め切りました。" if ok else "募集が見つかりません。", ephemeral=True)
 
 
 @bot.tree.command(name="practice_confirm", description="確定した候補を設定します")
-async def practice_confirm(interaction: discord.Interaction, practice_id: int, option_no: int):
+@app_commands.autocomplete(practice_id=practice_autocomplete, option_no=option_autocomplete)
+@app_commands.describe(
+    member1="対象メンバー1",
+    member2="対象メンバー2",
+    member3="対象メンバー3",
+    member4="対象メンバー4",
+    member5="対象メンバー5",
+    member6="対象メンバー6",
+    member7="対象メンバー7",
+    member8="対象メンバー8",
+    coach="任意のコーチ",
+)
+async def practice_confirm(
+    interaction: discord.Interaction,
+    practice_id: int,
+    option_no: int,
+    member1: discord.Member | None = None,
+    member2: discord.Member | None = None,
+    member3: discord.Member | None = None,
+    member4: discord.Member | None = None,
+    member5: discord.Member | None = None,
+    member6: discord.Member | None = None,
+    member7: discord.Member | None = None,
+    member8: discord.Member | None = None,
+    coach: discord.Member | None = None,
+):
     if not await bot.ensure_leader(interaction):
+        return
+    practice = bot.storage.get_practice(practice_id, interaction.guild_id)
+    if not practice:
+        await interaction.response.send_message("指定の募集が見つかりません。", ephemeral=True)
         return
     ok = bot.storage.set_confirmed_option(practice_id, option_no)
     if not ok:
         await interaction.response.send_message("指定の候補が見つかりません。", ephemeral=True)
         return
+
+    member_inputs = [member1, member2, member3, member4, member5, member6, member7, member8]
+    provided_targets = any(member is not None for member in member_inputs) or coach is not None
+    if provided_targets:
+        updated_targets: list[tuple[int, str, str, int]] = []
+        seen_ids: set[int] = set()
+        for sort_order, member in enumerate((m for m in member_inputs if m is not None), start=1):
+            if member.id in seen_ids:
+                continue
+            seen_ids.add(member.id)
+            updated_targets.append((member.id, member.display_name, "member", sort_order))
+            bot.storage.add_member(member.id, member.display_name, "member", None, now_jst(bot.config_data.timezone).isoformat())
+        if coach and coach.id not in seen_ids:
+            updated_targets.append((coach.id, coach.display_name, "coach", len(updated_targets) + 1))
+            bot.storage.add_member(coach.id, coach.display_name, "coach", None, now_jst(bot.config_data.timezone).isoformat())
+        if not updated_targets:
+            await interaction.response.send_message("対象メンバーを1人以上指定してください。", ephemeral=True)
+            return
+        bot.storage.replace_practice_targets(practice_id, updated_targets)
+
+    suffix = "対象メンバーも更新しました。" if provided_targets else "リマインド対象になります。"
     await interaction.response.send_message(
-        f"募集ID {practice_id} の候補{option_no} を確定しました。リマインド対象になります。"
+        f"募集ID {practice_id} の候補{option_no} を確定しました。{suffix}"
     )
 
 
 @bot.tree.command(name="practice_remind", description="確定済み候補のリマインドを手動送信します")
+@app_commands.autocomplete(practice_id=practice_autocomplete)
 async def practice_remind(interaction: discord.Interaction, practice_id: int):
     if not await bot.ensure_leader(interaction):
         return
-    practice = bot.storage.get_practice(practice_id)
+    practice = bot.storage.get_practice(practice_id, interaction.guild_id)
     if not practice:
         await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
         return
@@ -696,10 +769,9 @@ async def practice_help(interaction: discord.Interaction):
     message = (
         "**LTK 練習調整BOT 使い方**\n"
         "リーダー:\n"
-        "- /member_add\n"
-        "- /member_remove\n"
         "- /practice_create （集計期限は 15m / 2h / 1d / 3h15m 形式、対象メンバー指定つき）\n"
-        "- /practice_confirm\n"
+        "- /practice_show\n"
+        "- /practice_confirm （確定 + 必要なら対象メンバー調整）\n"
         "- /practice_close\n"
         "- /practice_remind\n\n"
         "回答者:\n"

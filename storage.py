@@ -18,6 +18,7 @@ class Member:
 @dataclass
 class Practice:
     id: int
+    guild_id: int
     title: str
     description: str | None
     channel_id: int
@@ -84,6 +85,7 @@ class Storage:
 
                 CREATE TABLE IF NOT EXISTS practices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL DEFAULT 0,
                     title TEXT NOT NULL,
                     description TEXT,
                     channel_id INTEGER NOT NULL,
@@ -136,6 +138,7 @@ class Storage:
             )
             self._ensure_column(conn, "practices", "collect_deadline", "TEXT")
             self._ensure_column(conn, "practices", "closed_reason", "TEXT")
+            self._ensure_column(conn, "practices", "guild_id", "INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -174,6 +177,7 @@ class Storage:
 
     def create_practice(
         self,
+        guild_id: int,
         title: str,
         description: str | None,
         channel_id: int,
@@ -186,10 +190,10 @@ class Storage:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO practices (title, description, channel_id, created_by, created_at, collect_deadline)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO practices (guild_id, title, description, channel_id, created_by, created_at, collect_deadline)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (title, description, channel_id, created_by, created_at, collect_deadline),
+                (guild_id, title, description, channel_id, created_by, created_at, collect_deadline),
             )
             practice_id = int(cur.lastrowid)
             conn.executemany(
@@ -208,18 +212,25 @@ class Storage:
             )
         return practice_id
 
-    def list_practices(self, include_closed: bool = False) -> list[Practice]:
-        sql = "SELECT * FROM practices"
+    def list_practices(self, guild_id: int, include_closed: bool = False) -> list[Practice]:
+        sql = "SELECT * FROM practices WHERE guild_id = ?"
+        params: list[object] = [guild_id]
         if not include_closed:
-            sql += " WHERE is_closed = 0"
+            sql += " AND is_closed = 0"
         sql += " ORDER BY id DESC"
         with self._connect() as conn:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [Practice(**dict(row)) for row in rows]
 
-    def get_practice(self, practice_id: int) -> Practice | None:
+    def get_practice(self, practice_id: int, guild_id: int | None = None) -> Practice | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM practices WHERE id = ?", (practice_id,)).fetchone()
+            if guild_id is None:
+                row = conn.execute("SELECT * FROM practices WHERE id = ?", (practice_id,)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM practices WHERE id = ? AND guild_id = ?",
+                    (practice_id, guild_id),
+                ).fetchone()
         return Practice(**dict(row)) if row else None
 
     def get_practice_options(self, practice_id: int) -> list[PracticeOption]:
@@ -250,6 +261,19 @@ class Storage:
                 (practice_id, user_id),
             ).fetchone()
         return row is not None
+
+    def replace_practice_targets(
+        self, practice_id: int, targets: Iterable[tuple[int, str, str, int]]
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM practice_targets WHERE practice_id = ?", (practice_id,))
+            conn.executemany(
+                """
+                INSERT INTO practice_targets (practice_id, user_id, display_name, role_kind, sort_order)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [(practice_id, user_id, display_name, role_kind, sort_order) for user_id, display_name, role_kind, sort_order in targets],
+            )
 
     def close_practice(self, practice_id: int, reason: str | None = None) -> bool:
         with self._connect() as conn:
