@@ -207,8 +207,8 @@ class PracticeBot(commands.Bot):
         )
         return True, f"候補{option_no} に `{STATUS_LABELS[status]}` で回答しました。"
 
-    def build_practice_summary(self, practice_id: int) -> str:
-        practice = self.storage.get_practice(practice_id, interaction.guild_id)
+    def build_practice_summary(self, practice_id: int, guild_id: int | None = None) -> str:
+        practice = self.storage.get_practice(practice_id, guild_id)
         if not practice:
             return "募集が見つかりません。"
 
@@ -575,7 +575,7 @@ async def practice_create(
         options=parsed_options,
         targets=targets,
     )
-    summary = bot.build_practice_summary(practice_id)
+    summary = bot.build_practice_summary(practice_id, interaction.guild_id)
     mentions = " ".join(f"<@{user_id}>" for user_id, _, _, _ in targets)
     await interaction.response.send_message(
         f"{mentions}\n日程調整を作成しました。\n\n{summary}\n\n"
@@ -612,7 +612,7 @@ async def practice_show(interaction: discord.Interaction, practice_id: int):
         await interaction.response.send_message("指定の募集が見つかりません。", ephemeral=True)
         return
     await interaction.response.send_message(
-        bot.build_practice_summary(practice_id),
+        bot.build_practice_summary(practice_id, interaction.guild_id),
         allowed_mentions=discord.AllowedMentions.none(),
         ephemeral=True,
     )
