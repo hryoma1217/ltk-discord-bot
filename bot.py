@@ -24,6 +24,13 @@ STATUS_LABELS = {
 }
 
 
+STATUS_BUTTON_LABELS = {
+    "available": "参加可能",
+    "maybe": "微妙",
+    "unavailable": "参加不可",
+}
+
+
 @dataclass
 class BotConfig:
     token: str
@@ -165,6 +172,33 @@ class PracticeBot(commands.Bot):
             await interaction.response.send_message("この募集で指定された対象メンバーのみ回答できます。", ephemeral=True)
             return False
         return True
+
+    async def save_availability_response(
+        self,
+        interaction: discord.Interaction,
+        practice_id: int,
+        option_no: int,
+        status: str,
+        comment: str | None = None,
+    ) -> tuple[bool, str]:
+        practice = self.storage.get_practice(practice_id)
+        if not practice:
+            return False, "指定の募集が見つかりません。"
+        if practice.is_closed:
+            return False, "この募集はすでに締め切られています。"
+        if not self.storage.is_practice_target(practice_id, interaction.user.id):
+            return False, "この募集で指定された対象メンバーのみ回答できます。"
+        option = next((opt for opt in self.storage.get_practice_options(practice_id) if opt.option_no == option_no), None)
+        if option is None:
+            return False, "候補番号が見つかりません。"
+        self.storage.set_availability(
+            option.id,
+            interaction.user.id,
+            status,
+            comment,
+            now_jst(self.config_data.timezone).isoformat(),
+        )
+        return True, f"候補{option_no} に `{STATUS_LABELS[status]}` で回答しました。"
 
     def build_practice_summary(self, practice_id: int) -> str:
         practice = self.storage.get_practice(practice_id)
@@ -314,6 +348,93 @@ class PracticeBot(commands.Bot):
         await self.wait_until_ready()
 
 
+class AvailabilityCommentModal(discord.ui.Modal):
+    def __init__(self, practice_id: int, option_no: int, status: str) -> None:
+        super().__init__(title=f"候補{option_no} コメント追加")
+        self.practice_id = practice_id
+        self.option_no = option_no
+        self.status = status
+        self.comment = discord.ui.TextInput(
+            label="備考 / コメント",
+            placeholder="22時からなら参加可能、途中参加なら可 など",
+            required=False,
+            max_length=200,
+        )
+        self.add_item(self.comment)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        ok, message = await bot.save_availability_response(
+            interaction,
+            self.practice_id,
+            self.option_no,
+            self.status,
+            str(self.comment.value).strip() or None,
+        )
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+class CommentButton(discord.ui.Button):
+    def __init__(self, practice_id: int, option_no: int, status: str) -> None:
+        super().__init__(label="コメントを追加", style=discord.ButtonStyle.secondary)
+        self.practice_id = practice_id
+        self.option_no = option_no
+        self.status = status
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await bot.ensure_target_member(interaction, self.practice_id):
+            return
+        await interaction.response.send_modal(
+            AvailabilityCommentModal(self.practice_id, self.option_no, self.status)
+        )
+
+
+class CommentPromptView(discord.ui.View):
+    def __init__(self, practice_id: int, option_no: int, status: str) -> None:
+        super().__init__(timeout=1800)
+        self.add_item(CommentButton(practice_id, option_no, status))
+
+
+class AvailabilityButton(discord.ui.Button):
+    def __init__(self, practice_id: int, option_no: int, status: str) -> None:
+        style_map = {
+            "available": discord.ButtonStyle.success,
+            "maybe": discord.ButtonStyle.secondary,
+            "unavailable": discord.ButtonStyle.danger,
+        }
+        super().__init__(
+            label=f"候補{option_no} {STATUS_BUTTON_LABELS[status]}",
+            style=style_map[status],
+        )
+        self.practice_id = practice_id
+        self.option_no = option_no
+        self.status = status
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        ok, message = await bot.save_availability_response(
+            interaction,
+            self.practice_id,
+            self.option_no,
+            self.status,
+            None,
+        )
+        if not ok:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"{message}\n必要なら下のボタンからコメントも追加できます。",
+            ephemeral=True,
+            view=CommentPromptView(self.practice_id, self.option_no, self.status),
+        )
+
+
+class PracticeAvailabilityView(discord.ui.View):
+    def __init__(self, practice_id: int, option_count: int) -> None:
+        super().__init__(timeout=86400)
+        for option_no in range(1, option_count + 1):
+            for status in ("available", "maybe", "unavailable"):
+                self.add_item(AvailabilityButton(practice_id, option_no, status))
+
+
 bot = PracticeBot(load_config())
 
 
@@ -439,8 +560,9 @@ async def practice_create(
     mentions = " ".join(f"<@{user_id}>" for user_id, _, _, _ in targets)
     await interaction.response.send_message(
         f"{mentions}\n日程調整を作成しました。\n\n{summary}\n\n"
-        "対象メンバーは `/availability_set` で回答してください。",
+        "対象メンバーは下のボタンUIから回答してください。",
         allowed_mentions=discord.AllowedMentions(users=True),
+        view=PracticeAvailabilityView(practice_id, len(parsed_options)),
     )
 
 
@@ -573,10 +695,9 @@ async def practice_help(interaction: discord.Interaction):
         "- /practice_confirm\n"
         "- /practice_close\n"
         "- /practice_remind\n\n"
-        "メンバー:\n"
-        "- /practice_list\n"
-        "- /practice_show\n"
-        "- /availability_set\n"
+        "回答者:\n"
+        "- 通知メッセージのボタンUIから回答\n"
+        "- 必要ならボタン押下後にコメント追加\n"
     )
     await interaction.response.send_message(message, ephemeral=True)
 
